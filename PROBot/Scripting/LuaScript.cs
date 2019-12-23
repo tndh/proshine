@@ -304,7 +304,7 @@ namespace PROBot.Scripting
             // General actions
             _lua.Globals["useItem"] = new Func<string, bool>(UseItem);
             _lua.Globals["useItemOnPokemon"] = new Func<string, int, bool>(UseItemOnPokemon);
-
+	    _lua.Globals["useItemIdOnPokemon"] = new Func<int, int, bool>(UseItemIdOnPokemon);
             // Battle actions
             _lua.Globals["attack"] = new Func<bool>(Attack);
             _lua.Globals["weakAttack"] = new Func<bool>(WeakAttack);
@@ -2639,6 +2639,27 @@ namespace PROBot.Scripting
                 else if (!Bot.Game.IsInBattle && item.CanBeUsedOnPokemonOutsideOfBattle)
                 {
                     if (!ValidateAction("useItemOnPokemon", false)) return false;
+                    Bot.Game.UseItem(item.Id, pokemonIndex);
+                    return ExecuteAction(true);
+                }
+            }
+            return false;
+        }
+        // API: Uses the specified item ID on the specified pokémon.
+        private bool UseItemIdOnPokemon(int itemId, int pokemonIndex)
+        {
+            InventoryItem item = Bot.Game.GetItemFromId(itemId);
+
+            if (item != null && item.Quantity > 0)
+            {
+                if (Bot.Game.IsInBattle && item.CanBeUsedOnPokemonInBattle)
+                {
+                    if (!ValidateAction("useItemIdOnPokemon", true)) return false;
+                    return ExecuteAction(Bot.AI.UseItem(item.Id, pokemonIndex));
+                }
+                else if (!Bot.Game.IsInBattle && item.CanBeUsedOnPokemonOutsideOfBattle)
+                {
+                    if (!ValidateAction("useItemIdOnPokemon", false)) return false;
                     Bot.Game.UseItem(item.Id, pokemonIndex);
                     return ExecuteAction(true);
                 }
