@@ -1,0 +1,5 @@
+D:\Download\Compressed\proshine-3.0.0-unofficial_beta7\BrightNetwork\bin\Debug\BrightNetwork.dll
+D:\Download\Compressed\proshine-3.0.0-unofficial_beta7\BrightNetwork\bin\Debug\BrightNetwork.pdb
+D:\Download\Compressed\proshine-3.0.0-unofficial_beta7\BrightNetwork\obj\Debug\BrightNetwork.csprojAssemblyReference.cache
+D:\Download\Compressed\proshine-3.0.0-unofficial_beta7\BrightNetwork\obj\Debug\BrightNetwork.dll
+D:\Download\Compressed\proshine-3.0.0-unofficial_beta7\BrightNetwork\obj\Debug\BrightNetwork.pdb
