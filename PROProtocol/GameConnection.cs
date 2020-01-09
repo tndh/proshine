@@ -8,8 +8,6 @@ namespace PROProtocol
 {
     public class GameConnection : SimpleTextClient
     {
-        private const int ServerPort = 800;
-
         public GameServer Server;
 
         private bool _useSocks;
@@ -41,17 +39,17 @@ namespace PROProtocol
 
         public async void Connect()
         {
-            string host = Server.GetAddress();
+            var serverHost = Server.GetAddress();
             
             if (!_useSocks)
             {
-                Connect(IPAddress.Parse(host), ServerPort);
+                Connect(serverHost.Address, serverHost.Port);
             }
             else
             {
                 try
                 {
-                    Socket socket = await SocksConnection.OpenConnection(_socksVersion, host, ServerPort, _socksHost, _socksPort, _socksUser, _socksPass);
+                    Socket socket = await SocksConnection.OpenConnection(_socksVersion, serverHost.Address, serverHost.Port, _socksHost, _socksPort, _socksUser, _socksPass);
                     Initialize(socket);
                 }
                 catch (Exception ex)
@@ -63,12 +61,16 @@ namespace PROProtocol
 
         protected override string ProcessDataBeforeSending(string data)
         {
-            return XorEncryption.Encrypt(data);
+            var input_bytes = TextEncoding.GetBytes(data);
+            var output_bytes = XorEncryption.Encrypt(input_bytes);
+            return TextEncoding.GetString(output_bytes);
         }
 
         protected override string ProcessDataBeforeReceiving(string data)
         {
-            return XorEncryption.Encrypt(data);
+            var input_bytes = TextEncoding.GetBytes(data);
+            var output_bytes = XorEncryption.Decrypt(input_bytes);
+            return TextEncoding.GetString(output_bytes);
         }
     }
 }

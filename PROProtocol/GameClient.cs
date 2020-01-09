@@ -6,12 +6,19 @@ namespace PROProtocol
 {
     public class GameClient
     {
+        private InventoryItem GroundMount;
+        private InventoryItem WaterMount;
+
+        public string GroundMountName;
+        public string WaterMountName;
+
         public Random Rand { get; private set; }
         public Language I18n { get; private set; }
 
         public bool IsConnected { get; private set; }
         public bool IsAuthenticated { get; private set; }
         public string PlayerName { get; private set; }
+        public int GuildId { get; private set; } = -1;
 
         public int PlayerX { get; private set; }
         public int PlayerY { get; private set; }
@@ -33,6 +40,7 @@ namespace PROProtocol
 
         public int Money { get; private set; }
         public int Coins { get; private set; }
+        public bool IsMember { get; private set; }
         public List<Pokemon> Team { get; private set; }
         public List<Pokemon> CurrentPCBox { get; private set; }
         public List<InventoryItem> Items { get; private set; }
@@ -47,14 +55,17 @@ namespace PROProtocol
 
         public Battle ActiveBattle { get; private set; }
         public Shop OpenedShop { get; private set; }
+        public MoveRelearner MoveRelearner { get; private set; }
 
-        public List<ChatChannel> Channels { get; private set; }
-        public List<string> Conversations { get; private set; }
-        public Dictionary<string, PlayerInfos> Players { get; private set; }
+        public List<ChatChannel> Channels { get; }
+        public List<string> Conversations { get; }
+        public Dictionary<string, PlayerInfos> Players { get; }
         private DateTime _updatePlayers;
         private DateTime _refreshBoxTimeout;
         public bool IsPCBoxRefreshing { get; private set; }
         public int CurrentPCBoxId { get; private set; }
+
+        public bool IsCreatingNewCharacter { get; private set; }
 
         public event Action ConnectionOpened;
         public event Action<Exception> ConnectionFailed;
@@ -66,12 +77,14 @@ namespace PROProtocol
         public event Action<string, int, int> PositionUpdated;
         public event Action<string, int, int> TeleportationOccuring;
         public event Action<string> MapLoaded;
+        public event Action<List<Npc>> NpcReceived;
         public event Action PokemonsUpdated;
         public event Action InventoryUpdated;
         public event Action BattleStarted;
         public event Action<string> BattleMessage;
         public event Action BattleEnded;
-        public event Action<string> DialogOpened;
+        public event Action BattleUpdated;
+        public event Action<string, string[]> DialogOpened;
         public event Action<string, string, int> EmoteMessage;
         public event Action<string, string, string> ChatMessage;
         public event Action RefreshChannelList;
@@ -89,9 +102,13 @@ namespace PROProtocol
         public event Action<int, int> Evolving;
         public event Action<string, string> PokeTimeUpdated;
         public event Action<Shop> ShopOpened;
+        public event Action<MoveRelearner> MoveRelearnerOpened;
         public event Action<List<Pokemon>> PCBoxUpdated;
+        public event Action<string> LogMessage;
+        public event Action ActivePokemonChanged;
+        public event Action OpponentChanged;
 
-        private const string Version = "0.958x";
+        private const string Version = "Xmas19";
 
         private GameConnection _connection;
         private DateTime _lastMovement;
@@ -110,47 +127,40 @@ namespace PROProtocol
         private Timeout _itemUseTimeout = new Timeout();
         private Timeout _fishingTimeout = new Timeout();
         private Timeout _refreshingPCBox = new Timeout();
+        private Timeout _moveRelearnerTimeout = new Timeout();
+
+        private Timeout _npcBattleTimeout = new Timeout();
+        private Npc _npcBattler;
 
         private MapClient _mapClient;
+        private List<int> _requestedGuildData = new List<int>();
 
-        public bool IsInactive
+        public void ClearPath()
         {
-            get
-            {
-                return _movements.Count == 0
-                    && !_movementTimeout.IsActive
-                    && !_battleTimeout.IsActive
-                    && !_loadingTimeout.IsActive
-                    && !_mountingTimeout.IsActive
-                    && !_teleportationTimeout.IsActive
-                    && !_dialogTimeout.IsActive
-                    && !_swapTimeout.IsActive
-                    && !_itemUseTimeout.IsActive
-                    && !_fishingTimeout.IsActive
-                    && !_refreshingPCBox.IsActive;
-            }
+            _movements.Clear();
         }
 
-        public bool IsTeleporting
-        {
-            get
-            {
-                return _teleportationTimeout.IsActive;
-            }
-        }
+        public bool IsInactive =>
+            _movements.Count == 0
+            && !_movementTimeout.IsActive
+            && !_battleTimeout.IsActive
+            && !_loadingTimeout.IsActive
+            && !_mountingTimeout.IsActive
+            && !_teleportationTimeout.IsActive
+            && !_dialogTimeout.IsActive
+            && !_swapTimeout.IsActive
+            && !_itemUseTimeout.IsActive
+            && !_fishingTimeout.IsActive
+            && !_refreshingPCBox.IsActive
+            && !_npcBattleTimeout.IsActive
+            && !_moveRelearnerTimeout.IsActive
+            && !IsCreatingNewCharacter;
 
-        public GameServer Server
-        {
-            get
-            {
-                return _connection.Server;
-            }
-        }
+        public bool IsTeleporting => _teleportationTimeout.IsActive;
 
-        public bool IsMapLoaded
-        {
-            get { return Map != null; }
-        }
+        public GameServer Server => _connection.Server;
+
+        public bool IsMapLoaded => Map != null;
         public bool AreNpcReceived { get; private set; }
 
         public GameClient(GameConnection connection, MapConnection mapConnection)
@@ -180,7 +190,7 @@ namespace PROProtocol
 
         public void Open()
         {
-            _mapClient.Open();
+            _connection.Connect();
         }
 
         public void Close(Exception error = null)
@@ -196,7 +206,6 @@ namespace PROProtocol
                 return;
 
             _movementTimeout.Update();
-            _battleTimeout.Update();
             _loadingTimeout.Update();
             _mountingTimeout.Update();
             _teleportationTimeout.Update();
@@ -205,12 +214,21 @@ namespace PROProtocol
             _itemUseTimeout.Update();
             _fishingTimeout.Update();
             _refreshingPCBox.Update();
+            _moveRelearnerTimeout.Update();
+
+            if (!_battleTimeout.Update() && ActiveBattle != null && ActiveBattle.IsFinished)
+            {
+                ActiveBattle = null;
+                SendPacket("_");
+            }
 
             SendRegularPing();
             UpdateMovement();
             UpdateScript();
             UpdatePlayers();
             UpdatePCBox();
+            UpdateNpcBattle();
+            UpdateMounts();
         }
 
         public void CloseChannel(string channelName)
@@ -230,13 +248,33 @@ namespace PROProtocol
             }
         }
 
+        private int _pingCurrentStep = 1;
+        private bool _isPingSwapped = false;
+
         private void SendRegularPing()
         {
-            if ((DateTime.UtcNow - _lastMovement).TotalSeconds >= 10)
+            if ((DateTime.UtcNow - _lastMovement).TotalSeconds > 6)
             {
                 _lastMovement = DateTime.UtcNow;
                 // DSSock.Update
-                SendPacket("2");
+                int packetType;
+                if (_pingCurrentStep == 5)
+                {
+                    packetType = _isPingSwapped ? 2 : 1;
+                    _pingCurrentStep = 0;
+                }
+                else
+                {
+                    packetType = Rand.Next(2) + 1;
+                }
+
+                if (packetType == 1)
+                {
+                    _isPingSwapped = !_isPingSwapped;
+                }
+
+                _pingCurrentStep++;
+                SendPacket(packetType.ToString());
             }
         }
 
@@ -246,6 +284,13 @@ namespace PROProtocol
 
             if (!_movementTimeout.IsActive && _movements.Count > 0)
             {
+                if (GroundMount != null && !_itemUseTimeout.IsActive && !IsBiking && !IsSurfing && Map.IsOutside)
+                {
+                    LogMessage?.Invoke($"Mounting [{GroundMount.Name}]");
+                    UseItem(GroundMount.Id);
+                    return;
+                }
+
                 Direction direction = _movements[0];
                 _movements.RemoveAt(0);
 
@@ -256,6 +301,19 @@ namespace PROProtocol
                     if (Map.HasLink(PlayerX, PlayerY))
                     {
                         _teleportationTimeout.Set();
+                    }
+                    else
+                    {
+                        Npc battler = Map.Npcs.FirstOrDefault(npc => npc.CanBattle && npc.IsInLineOfSight(PlayerX, PlayerY));
+                        if (battler != null)
+                        {
+                            battler.CanBattle = false;
+                            LogMessage?.Invoke("The NPC " + (battler.Name ?? battler.Id.ToString()) + " saw us, interacting...");
+                            _npcBattler = battler;
+                            int distanceFromBattler = DistanceBetween(PlayerX, PlayerY, battler.PositionX, battler.PositionY);
+                            _npcBattleTimeout.Set(Rand.Next(1000, 2000) + distanceFromBattler * 250);
+                            ClearPath();
+                        }
                     }
                 }
 
@@ -300,6 +358,17 @@ namespace PROProtocol
                 CurrentPCBox = new List<Pokemon>();
                 PCBoxUpdated?.Invoke(CurrentPCBox);
             }
+        }
+
+        private void UpdateNpcBattle()
+        {
+            if (_npcBattler == null) return;
+
+            _npcBattleTimeout.Update();
+            if (_npcBattleTimeout.IsActive) return;
+
+            TalkToNpc(_npcBattler);
+            _npcBattler = null;
         }
 
         private bool ApplyMovement(Direction direction)
@@ -365,13 +434,25 @@ namespace PROProtocol
                     SendDialogResponse(GetNextDialogResponse());
                     _dialogTimeout.Set();
                 }
-                else if (ScriptStatus == 1234) // Yes, this is a magic value. I don't care.
-                {
-                    SendCreateCharacter(Rand.Next(14), Rand.Next(28), Rand.Next(8), Rand.Next(6), Rand.Next(5));
-                    IsScriptActive = false;
-                    _dialogTimeout.Set();
-                }
             }
+        }
+
+        // Sometimes because of the connection speed the bot may receive items data later, so saving the mount name and would try to set it when it receives all items.
+        private void UpdateMounts()
+        {
+            bool isGroundMountSet = !string.IsNullOrEmpty(GroundMountName);
+            bool isWaterMountSet = !string.IsNullOrEmpty(WaterMountName);
+
+            if (!isGroundMountSet)
+                GroundMount = null;
+            if (!isWaterMountSet)
+                WaterMount = null;
+
+            if ((GroundMount is null && isWaterMountSet) || (GroundMount != null && GroundMount.Name.ToLowerInvariant() != GroundMountName.ToLowerInvariant()))
+                GroundMount = GetItemFromName(GroundMountName);
+
+            if ((WaterMount is null && isWaterMountSet) || (WaterMount != null && WaterMount.Name.ToLowerInvariant() != WaterMountName.ToLowerInvariant()))
+                WaterMount = GetItemFromName(WaterMountName);
         }
 
         private int GetNextDialogResponse()
@@ -429,15 +510,40 @@ namespace PROProtocol
             SendPacket("{|.|" + pmHeader + '|' + text);
         }
 
-        public void SendCreateCharacter(int hair, int colour, int tone, int clothe, int eyes)
+        public void SendStartPrivateMessage(string nickname)
+        {
+            SendMessage("/pm " + PlayerName + "-=-" + nickname);
+        }
+
+        public void SendFriendToggle(string nickname)
+        {
+            SendMessage("/friend " + nickname);
+        }
+
+        public void SendIgnoreToggle(string nickname)
+        {
+            SendMessage("/ignore " + nickname);
+        }
+
+        public void CreateCharacter(int hair, int colour, int tone, int clothe, int eyes)
+        {
+            if (!IsCreatingNewCharacter) return;
+            IsCreatingNewCharacter = false;
+            SendCreateCharacter(hair, colour, tone, clothe, eyes);
+            _dialogTimeout.Set();
+        }
+
+        private void SendCreateCharacter(int hair, int colour, int tone, int clothe, int eyes)
         {
             SendMessage("/setchar " + hair + "," + colour + "," + tone + "," + clothe + "," + eyes);
         }
 
-        public void SendAuthentication(string username, string password, string hash)
+        public void SendAuthentication(string username, string password, Guid deviceId)
         {
             // DSSock.AttemptLogin
-            SendPacket("+|.|" + username + "|.|" + password + "|.|" + Version + "|.|" + hash);
+            SendPacket("+|.|" + username + "|.|" + password + "|.|" + Version + "|.|" + XorEncryption.FixDeviceId(deviceId) + "|.|" + "Windows 10  (10.0.0) 64bit");
+            // TODO: Add an option to select the OS we want, it could be useful.
+            // I use Windows 10 here because the version is the same for everyone. This is not the case on Windows 7 or Mac.
         }
 
         public void SendUseItem(int id, int pokemon = 0)
@@ -489,7 +595,8 @@ namespace PROProtocol
 
         private void SendReleasePokemon(int pokemonUid)
         {
-            SendMessage("/release " + pokemonUid);
+            SendMessage("/release " + pokemonUid + ", 1");
+            SendPacket("mb|.|/release " + pokemonUid);
         }
 
         private void SendPrivateMessageOn()
@@ -505,6 +612,11 @@ namespace PROProtocol
         private void SendPrivateMessageAway()
         {
             SendMessage("/pmaway");
+        }
+
+        private void SendRequestGuildData(int id)
+        {
+            SendPacket(":|.|" + id);
         }
 
         public bool PrivateMessageOn()
@@ -745,10 +857,11 @@ namespace PROProtocol
 
         public bool HasSurfAbility()
         {
-            return HasMove("Surf") &&
+            return (HasMove("Surf") || WaterMount != null) &&
                 (Map.Region == "1" && HasItemName("Soul Badge") ||
                 Map.Region == "2" && HasItemName("Fog Badge") ||
-                Map.Region == "3" && HasItemName("Balance Badge"));
+                Map.Region == "3" && HasItemName("Balance Badge") ||
+                Map.Region == "4" && HasItemName("Relic Badge"));
         }
 
         public bool HasCutAbility()
@@ -756,7 +869,8 @@ namespace PROProtocol
             return (HasMove("Cut") || HasTreeaxe()) &&
                 (Map.Region == "1" && HasItemName("Cascade Badge") ||
                 Map.Region == "2" && HasItemName("Hive Badge") ||
-                Map.Region == "3" && HasItemName("Stone Badge"));
+                Map.Region == "3" && HasItemName("Stone Badge") ||
+                Map.Region == "4" && HasItemName("Forest Badge"));
         }
 
         public bool HasRockSmashAbility()
@@ -779,6 +893,8 @@ namespace PROProtocol
             return Team.FirstOrDefault(p => p.Uid == pokemonUid)?.Moves.Any(m => m.Name?.Equals(moveName, StringComparison.InvariantCultureIgnoreCase) ?? false) ?? false;
         }
 
+        public Pokemon GetPokemonFromDBId(int pokemonDBId) => Team.Find(pokemon => pokemon.DatabaseId == pokemonDBId);
+
         public bool HasMove(string moveName)
         {
             return Team.Any(p => p.Moves.Any(m => m.Name?.Equals(moveName, StringComparison.InvariantCultureIgnoreCase) ?? false));
@@ -791,7 +907,7 @@ namespace PROProtocol
 
         public InventoryItem GetItemFromId(int id)
         {
-            return Items.FirstOrDefault(i => i.Id == id && i.Quantity > 0);
+            return Items.Find(i => i.Id == id && i.Quantity > 0);
         }
 
         public bool HasItemId(int id)
@@ -801,7 +917,8 @@ namespace PROProtocol
 
         public InventoryItem GetItemFromName(string itemName)
         {
-            return Items.FirstOrDefault(i => i.Name.Equals(itemName, StringComparison.InvariantCultureIgnoreCase) && i.Quantity > 0);
+            return Items.Find(i => i.Name?.Equals(itemName, StringComparison.InvariantCultureIgnoreCase) == true
+                && i.Quantity > 0);
         }
 
         public bool HasItemName(string itemName)
@@ -814,14 +931,33 @@ namespace PROProtocol
             return FindFirstPokemonInTeam(pokemonName) != null;
         }
 
+        public bool HasPokemonIdInTeam(int pokemonId)
+        {
+            return FindFirstPokemonIdInTeam(pokemonId) != null;
+        }
+
         public Pokemon FindFirstPokemonInTeam(string pokemonName)
         {
-            return Team.FirstOrDefault(p => p.Name.Equals(pokemonName, StringComparison.InvariantCultureIgnoreCase));
+            return Team.Find(p => p.Name.Equals(pokemonName, StringComparison.InvariantCultureIgnoreCase));
+        }
+
+        public Pokemon FindFirstPokemonIdInTeam(int pokemonID)
+        {
+            return Team.Find(p => p.Id.Equals(pokemonID));
         }
 
         public void UseSurf()
         {
-            SendMessage("/surf");
+            if (WaterMount == null)
+            {
+                SendPacket("w|.|/surf");
+            }
+            else
+            {
+                LogMessage?.Invoke($"Mounting [{WaterMount.Name}]");
+                UseItem(WaterMount.Id);
+            }
+
             _mountingTimeout.Set();
         }
 
@@ -840,9 +976,11 @@ namespace PROProtocol
             UseAttack(number + 5);
         }
 
-        public void TalkToNpc(int id)
+        public void TalkToNpc(Npc npc)
         {
-            SendTalkToNpc(id);
+            npc.CanBattle = false;
+
+            SendTalkToNpc(npc.Id);
             _dialogTimeout.Set();
         }
 
@@ -877,12 +1015,47 @@ namespace PROProtocol
             return false;
         }
 
+        public bool PurchaseMove(string moveName)
+        {
+            if (MoveRelearner != null && MoveRelearner.Moves.Any(move => move.Name == moveName.ToLowerInvariant()))
+            {
+                _moveRelearnerTimeout.Set();
+                SendPurchaseMove(MoveRelearner.SelectedPokemonUid, moveName);
+                return true;
+            }
+            return false;
+        }
+
+        private void SendPurchaseMove(int pokemonUid, string moveName)
+        {
+            // DSSock.cs handles Move Relearn as below.
+
+            if (MoveRelearner != null)
+            {
+                if (!MoveRelearner.IsEgg)
+                {
+                    SendPacket("z|.|" + pokemonUid + "|.|" + moveName);
+                }
+                else
+                {
+                    int moveId = MovesManager.Instance.GetMoveId(moveName);
+                    if (moveId != -1)
+                    {
+                        SendPacket("b|.|" + pokemonUid + "|.|" + moveId);
+                    }
+                }
+            }
+        }
+
         private void MapClient_ConnectionOpened()
         {
 #if DEBUG
             Console.WriteLine("[+++] Connecting to the game server");
 #endif
-            _connection.Connect();
+            if (MapName != null && Map == null)
+            {
+                _mapClient.DownloadMap(MapName);
+            }
         }
 
         private void MapClient_ConnectionFailed(Exception ex)
@@ -956,9 +1129,10 @@ namespace PROProtocol
             _lastMovement = DateTime.UtcNow;
             // Consider the pokemart closed after the first movement.
             OpenedShop = null;
+            MoveRelearner = null;
             IsPCOpen = false;
             // DSSock.sendMove
-            SendPacket("/|.|" + direction);
+            SendPacket("#|.|" + direction);
         }
 
         private void SendAttack(string number)
@@ -980,16 +1154,16 @@ namespace PROProtocol
             SendPacket("R|.|" + ScriptId + "|.|" + number);
         }
 
-        public void SendAcceptEvolution(int evolvingPokemonUid, int evolvingItem)
+        public void SendAcceptEvolution(int evolvingPokemonDBid)
         {
             // DSSock.AcceptEvo
-            SendPacket("h|.|" + evolvingPokemonUid + "|.|" + evolvingItem);
+            SendPacket("h|.|" + evolvingPokemonDBid);
         }
 
-        public void SendCancelEvolution(int evolvingPokemonUid, int evolvingItem)
+        public void SendCancelEvolution(int evolvingPokemonDBid)
         {
             // DSSock.CancelEvo
-            SendPacket("j|.|" + evolvingPokemonUid + "|.|" + evolvingItem);
+            SendPacket("j|.|" + evolvingPokemonDBid);
         }
 
         private void SendSwapPokemons(int pokemon1, int pokemon2)
@@ -1013,121 +1187,140 @@ namespace PROProtocol
                 packet = "U|.|" + packet.Substring(1);
             }
 
-            string[] data = packet.Split(new string[] { "|.|" }, StringSplitOptions.None);
+            string[] data = packet.Split(new[] { "|.|" }, StringSplitOptions.None);
             string type = data[0].ToLowerInvariant();
-            switch (type)
+            try
             {
-                case "5":
-                    OnLoggedIn(data);
-                    break;
-                case "6":
-                    OnAuthenticationResult(data);
-                    break;
-                case ")":
-                    OnQueueUpdated(data);
-                    break;
-                case "q":
-                    OnPlayerPosition(data);
-                    break;
-                case "s":
-                    OnPlayerSync(data);
-                    break;
-                case "i":
-                    OnPlayerInfos(data);
-                    break;
-                case "(":
-                    // CDs ?
-                    break;
-                case "e":
-                    OnUpdateTime(data);
-                    break;
-                case "@":
-                    OnNpcBattlers(data);
-                    break;
-                case "*":
-                    OnNpcDestroy(data);
-                    break;
-                case "#":
-                    OnTeamUpdate(data);
-                    break;
-                case "d":
-                    OnInventoryUpdate(data);
-                    break;
-                case "&":
-                    OnItemsUpdate(data);
-                    break;
-                case "!":
-                    OnBattleJoin(packet);
-                    break;
-                case "a":
-                    OnBattleMessage(data);
-                    break;
-                case "r":
-                    OnScript(data);
-                    break;
-                case "$":
-                    OnBikingUpdate(data);
-                    break;
-                case "%":
-                    OnSurfingUpdate(data);
-                    break;
-                case "^":
-                    OnLearningMove(data);
-                    break;
-                case "h":
-                    OnEvolving(data);
-                    break;
-                case "u":
-                    OnUpdatePlayer(data);
-                    break;
-                case "c":
-                    OnChannels(data);
-                    break;
-                case "w":
-                    OnChatMessage(data);
-                    break;
-                case "o":
-                    // Shop content
-                    break;
-                case "pm":
-                    OnPrivateMessage(data);
-                    break;
-                case ".":
-                    // DSSock.ProcessCommands
-                    SendPacket("_");
-                    break;
-                case "'":
-                    // DSSock.ProcessCommands
-                    SendPacket("'");
-                    break;
-                case "m":
-                    OnPCBox(data);
-                    break;
-                default:
+                switch (type)
+                {
+                    case "5":
+                        OnLoggedIn(data);
+                        break;
+                    case "6":
+                        OnAuthenticationResult(data);
+                        break;
+                    case "l":
+                        //Move relearn content
+                        OnMoveRelearn(data);
+                        break;
+                    case ")":
+                        OnQueueUpdated(data);
+                        break;
+                    case "q":
+                        OnPlayerPosition(data);
+                        break;
+                    case "s":
+                        OnPlayerSync(data);
+                        break;
+                    case "i":
+                        OnPlayerInfos(data);
+                        break;
+                    case "(":
+                        // CDs ?
+                        break;
+                    case "e":
+                        OnUpdateTime(data);
+                        break;
+                    case "@":
+                        OnNpcBattlers(data);
+                        break;
+                    case "#":
+                        OnTeamUpdate(data);
+                        break;
+                    case "d":
+                        OnInventoryUpdate(data);
+                        break;
+                    case "&":
+                        OnItemsUpdate(data);
+                        break;
+                    case "!":
+                        OnBattleJoin(packet);
+                        break;
+                    case "a":
+                        OnBattleMessage(data);
+                        break;
+                    case "r":
+                        OnScript(data);
+                        break;
+                    case "$":
+                        OnBikingUpdate(data);
+                        break;
+                    case "%":
+                        OnSurfingUpdate(data);
+                        break;
+                    case "^":
+                        OnLearningMove(data);
+                        break;
+                    case "h":
+                        OnEvolving(data);
+                        break;
+                    case "=":
+                        OnUpdatePlayer(data);
+                        break;
+                    case "c":
+                        OnChannels(data);
+                        break;
+                    case "w":
+                        OnChatMessage(data);
+                        break;
+                    case "o":
+                        // Shop content
+                        break;
+                    case "pm":
+                        OnPrivateMessage(data);
+                        break;
+                    case ".":
+                        // DSSock.ProcessCommands
+                        SendPacket("_");
+                        break;
+                    case "'":
+                        // DSSock.ProcessCommands
+                        SendPacket("'");
+                        break;
+                    case "m":
+                        OnPCBox(data);
+                        break;
+                    case "z":
+                        OnPlayerMovement(data);
+                        break;
+                    case "y":
+                        OnGuildData(data);
+                        break;
+                    default:
 #if DEBUG
-                    Console.WriteLine(" ^ unhandled /!\\");
+                        Console.WriteLine(" ^ unhandled /!\\");
 #endif
-                    break;
+                        break;
+                }
             }
+            catch (System.FormatException)
+            {
+                LogMessage?.Invoke("Format error occurred(Probably server issue): " + packet);
+            }
+
         }
 
 
         private void OnLoggedIn(string[] data)
         {
+            Console.WriteLine("[Login] Authenticated successfully, connecting to map server");
+
+            IsCreatingNewCharacter = data[1] == "1";
+
+            string[] mapServerHost = data[2].Split(':');
+
+            _mapClient.Open(Server.GetMapAddress(), int.Parse(mapServerHost[1]));
+
             // DSSock.ProcessCommands
+            SendMessage("/in1");
+            // TODO: Add a setting to disable the party inspection (send /in0 instead).
             SendPacket(")");
             SendPacket("_");
             SendPacket("g");
+            SendPacket("p|.|l|0");
+            SendRegularPing();
             IsAuthenticated = true;
 
-            if (data[1] == "1")
-            {
-                IsScriptActive = true;
-                ScriptStatus = 1234;
-                _dialogTimeout.Set(Rand.Next(4000, 8000));
-            }
-
-            Console.WriteLine("[Login] Authenticated successfully");
             LoggedIn?.Invoke();
         }
 
@@ -1152,7 +1345,7 @@ namespace PROProtocol
 
         private void OnPlayerPosition(string[] data)
         {
-            string[] mapData = data[1].Split(new string[] { "|" }, StringSplitOptions.None);
+            string[] mapData = data[1].Split(new[] { "|" }, StringSplitOptions.None);
             string map = mapData[0];
             int playerX = Convert.ToInt32(mapData[1]);
             int playerY = Convert.ToInt32(mapData[2]);
@@ -1178,9 +1371,23 @@ namespace PROProtocol
             _teleportationTimeout.Cancel();
         }
 
+        // Server sends some movement data to move the character.
+        private void OnPlayerMovement(string[] data)
+        {
+            _dialogTimeout.Set();
+            _movements.Clear();
+            string[] movements = data[1].Split(new[] { "|" }, StringSplitOptions.None);
+            foreach (var movement in movements)
+            {
+                Move(DirectionExtensions.FromChar(movement[0]));
+            }
+
+            _teleportationTimeout.Cancel();
+        }
+
         private void OnPlayerSync(string[] data)
         {
-            string[] mapData = data[1].Split(new string[] { "|" }, StringSplitOptions.None);
+            string[] mapData = data[1].Split(new[] { "|" }, StringSplitOptions.None);
 
             if (mapData.Length < 2)
                 return;
@@ -1199,13 +1406,25 @@ namespace PROProtocol
             PositionUpdated?.Invoke(MapName, PlayerX, playerY);
         }
 
-         private void OnPlayerInfos(string[] data)
+        private void OnPlayerInfos(string[] data)
         {
             string[] playerData = data[1].Split('|');
             PlayerName = playerData[0];
             PokedexOwned = Convert.ToInt32(playerData[4]);
             PokedexSeen = Convert.ToInt32(playerData[5]);
             PokedexEvolved = Convert.ToInt32(playerData[6]);
+            IsMember = playerData[10] == "1";
+            if (GuildId != -1 && !_requestedGuildData.Contains(GuildId))
+            {
+                SendRequestGuildData(GuildId);
+                _requestedGuildData.Add(GuildId);
+            }
+        }
+
+        private void OnGuildData(string[] data)
+        {
+            //y|.|Guild name|999(id)|guild description|total members format: (total/max)|Leader Name|.\
+            GuildId = int.Parse(data[1].Split('|')[1]);
         }
 
         private void OnUpdateTime(string[] data)
@@ -1213,7 +1432,6 @@ namespace PROProtocol
             string[] timeData = data[1].Split('|');
 
             PokemonTime = timeData[0];
-            DateTime dt = Convert.ToDateTime(PokemonTime);
 
             Weather = timeData[1];
 
@@ -1224,40 +1442,25 @@ namespace PROProtocol
         {
             if (!IsMapLoaded) return;
 
-            IEnumerable<int> defeatedBattlers = data[1].Split(new [] { "|" }, StringSplitOptions.RemoveEmptyEntries).Select(id => int.Parse(id));
+            var npcData = data[1].Split('*');
+            var defeatedNpcs = npcData[0].Split(new[] { "|" }, StringSplitOptions.RemoveEmptyEntries).Select(int.Parse);
+            var destroyedNpcs = npcData[1].Split(new[] { "|" }, StringSplitOptions.RemoveEmptyEntries).Select(int.Parse);
 
             Map.Npcs.Clear();
             foreach (Npc npc in Map.OriginalNpcs)
             {
-                Npc clone = npc.Clone();
-                if (defeatedBattlers.Contains(npc.Id))
+                if (!destroyedNpcs.Contains(npc.Id))
                 {
-                    clone.CanBattle = false;
-                }
-                Map.Npcs.Add(clone);
-            }
-        }
+                    Npc clone = npc.Clone();
+                    if (defeatedNpcs.Contains(npc.Id))
+                        clone.CanBattle = false;
 
-        private void OnNpcDestroy(string[] data)
-        {
-            if (!IsMapLoaded) return;
-
-            string[] npcData = data[1].Split('|');
-
-            foreach (string npcText in npcData)
-            {
-                int npcId = int.Parse(npcText);
-                foreach (Npc npc in Map.Npcs)
-                {
-                    if (npc.Id == npcId)
-                    {
-                        Map.Npcs.Remove(npc);
-                        break;
-                    }
+                    Map.Npcs.Add(clone);
                 }
             }
 
             AreNpcReceived = true;
+            NpcReceived?.Invoke(Map.Npcs);
         }
 
         private void OnTeamUpdate(string[] data)
@@ -1310,7 +1513,7 @@ namespace PROProtocol
                 if (item == string.Empty)
                     continue;
                 string[] itemData = item.Split(new[] { "|" }, StringSplitOptions.None);
-                Items.Add(new InventoryItem(itemData[0], Convert.ToInt32(itemData[1]), Convert.ToInt32(itemData[2]), Convert.ToInt32(itemData[3])));
+                Items.Add(new InventoryItem(Convert.ToInt32(itemData[0]), Convert.ToInt32(itemData[1]), Convert.ToInt32(itemData[2])));
             }
 
             if (_itemUseTimeout.IsActive)
@@ -1328,6 +1531,8 @@ namespace PROProtocol
 
             IsInBattle = true;
             ActiveBattle = new Battle(PlayerName, data);
+            ActiveBattle.ActivePokemonChanged += ActivePokemonChanged;
+            ActiveBattle.OpponentChanged += OpponentChanged;
 
             _movements.Clear();
             _slidingDirection = null;
@@ -1337,7 +1542,7 @@ namespace PROProtocol
 
             BattleStarted?.Invoke();
 
-            string[] battleMessages = ActiveBattle.BattleText.Split(new string[] { "\r\n" }, StringSplitOptions.None);
+            string[] battleMessages = ActiveBattle.BattleText.Split(new[] { "\r\n" }, StringSplitOptions.None);
 
             foreach (string message in battleMessages)
             {
@@ -1346,6 +1551,8 @@ namespace PROProtocol
                     BattleMessage?.Invoke(I18n.Replace(message));
                 }
             }
+
+            BattleUpdated?.Invoke();
         }
 
         private void OnBattleMessage(string[] data)
@@ -1367,6 +1574,7 @@ namespace PROProtocol
             }
 
             PokemonsUpdated?.Invoke();
+            BattleUpdated?.Invoke();
 
             if (ActiveBattle.IsFinished)
             {
@@ -1380,7 +1588,6 @@ namespace PROProtocol
             if (ActiveBattle.IsFinished)
             {
                 IsInBattle = false;
-                ActiveBattle = null;
                 BattleEnded?.Invoke();
             }
         }
@@ -1392,13 +1599,15 @@ namespace PROProtocol
             string script = data[3];
 
             DialogContent = script.Split(new string[] { "-#-" }, StringSplitOptions.None);
-            if (script.Contains("-#-") && status > 1)
+            bool isPrompt = script.Contains("-#-") && status > 1;
+            if (isPrompt)
             {
                 script = DialogContent[0];
             }
             string[] messages = script.Split(new string[] { "-=-" }, StringSplitOptions.RemoveEmptyEntries);
-            foreach (string message in messages)
+            for (int i = 0; i < messages.Length; i++)
             {
+                string message = messages[i];
                 if (message.StartsWith("emote") || message.StartsWith("playsound") || message.StartsWith("playmusic") || message.StartsWith("playcry"))
                     continue;
                 if (message.StartsWith("shop"))
@@ -1407,13 +1616,49 @@ namespace PROProtocol
                     ShopOpened?.Invoke(OpenedShop);
                     continue;
                 }
-                DialogOpened?.Invoke(message);
+                if (message.StartsWith("moverelearner"))
+                {
+                    int pokemonUid = Convert.ToInt32(message.Substring(13));
+                    MoveRelearner = new MoveRelearner(pokemonUid, false);
+
+                    SendPacket("a|.|" + pokemonUid);
+                    continue;
+                }
+                if (message.StartsWith("eggsrelearner"))
+                {
+                    int pokemonUid = Convert.ToInt32(message.Substring(13));
+                    MoveRelearner = new MoveRelearner(pokemonUid, true);
+
+                    SendPacket(".|.|" + message.Substring(13));
+                    continue;
+                }
+
+                bool lastMessage = (i == messages.Length - 1);
+                if (lastMessage && isPrompt)
+                {
+                    var dialogOptions = new string[DialogContent.Length - 1];
+                    Array.Copy(DialogContent, 1, dialogOptions, 0, dialogOptions.Length);
+                    DialogOpened?.Invoke(message, dialogOptions);
+                }
+                else
+                {
+                    DialogOpened?.Invoke(message, new string[0]);
+                }
             }
 
             IsScriptActive = true;
             _dialogTimeout.Set(Rand.Next(1500, 4000));
             ScriptId = id;
             ScriptStatus = status;
+        }
+
+        private void OnMoveRelearn(string[] data)
+        {
+            if (MoveRelearner != null)
+            {
+                MoveRelearner.ProcessMessage(data[1]);
+                MoveRelearnerOpened?.Invoke(MoveRelearner);
+            }
         }
 
         private void OnBikingUpdate(string[] data)
@@ -1450,20 +1695,23 @@ namespace PROProtocol
         {
             int moveId = Convert.ToInt32(data[1]);
             string moveName = Convert.ToString(data[2]);
-            int pokemonUid = Convert.ToInt32(data[3]);
+            int pokemonDBid = Convert.ToInt32(data[3]);
             int movePp = Convert.ToInt32(data[4]);
-            LearningMove?.Invoke(moveId, moveName, pokemonUid);
+            LearningMove?.Invoke(moveId, moveName, pokemonDBid);
+            MoveRelearner = null;
             _itemUseTimeout.Cancel();
-            // ^|.|348|.|Cut|.|3|.|30|.\
+            _moveRelearnerTimeout.Cancel();
+            // ^|.|348|.|Cut|.|26703356|.|30
         }
 
         private void OnEvolving(string[] data)
         {
-            int evolvingPokemonUid = Convert.ToInt32(data[1]);
-            int evolvingItem = Convert.ToInt32(data[3]);
+            int evlovingPokemonDBid = Convert.ToInt32(data[1]);
+            int evolvingItem = Convert.ToInt32(data[2]);
 
-
-            Evolving.Invoke(evolvingPokemonUid, evolvingItem);
+            // h|.|41258652|.|178
+            //      ^^ Data base id
+            Evolving.Invoke(evlovingPokemonDBid, evolvingItem);
         }
 
         private void OnUpdatePlayer(string[] data)
@@ -1504,6 +1752,11 @@ namespace PROProtocol
             if (isNewPlayer)
             {
                 PlayerAdded?.Invoke(player);
+                if (!_requestedGuildData.Contains(player.GuildId) && player.GuildId != 0)
+                {
+                    SendRequestGuildData(player.GuildId);
+                    _requestedGuildData.Add(player.GuildId);
+                }
             }
             else
             {
@@ -1847,6 +2100,7 @@ namespace PROProtocol
             _loadingTimeout.Set(Rand.Next(1500, 4000));
 
             OpenedShop = null;
+            MoveRelearner = null;
             _movements.Clear();
             _surfAfterMovement = false;
             _slidingDirection = null;
@@ -1868,8 +2122,12 @@ namespace PROProtocol
             Map = null;
             AreNpcReceived = false;
             MapName = mapName;
-            _mapClient.DownloadMap(MapName);
             Players.Clear();
+
+            if (_mapClient.IsConnected)
+            {
+                _mapClient.DownloadMap(MapName);
+            }
         }
     }
 }

@@ -1,26 +1,24 @@
-﻿using System;
+using System;
+using System.Net;
 
 namespace PROProtocol
 {
     public enum GameServer
     {
-        Red,
-        Blue,
-        Yellow
+        Silver,
+        Gold
     }
 
     public static class GameServerExtensions
     {
-        public static string GetAddress(this GameServer server)
+        public static IPEndPoint GetAddress(this GameServer server)
         {
             switch (server)
             {
-                case GameServer.Red:
-                    return "46.28.203.224";
-                case GameServer.Blue:
-                    return "46.28.207.53";
-                case GameServer.Yellow:
-                    return "46.28.205.63";
+                case GameServer.Silver:
+                    return new IPEndPoint(IPAddress.Parse("185.212.131.104"), 800);
+                case GameServer.Gold:
+                    return new IPEndPoint(IPAddress.Parse("185.212.131.104"), 801);
             }
             return null;
         }
@@ -29,14 +27,19 @@ namespace PROProtocol
         {
             switch (name.ToUpperInvariant())
             {
-                case "RED":
-                    return GameServer.Red;
-                case "BLUE":
-                    return GameServer.Blue;
-                case "YELLOW":
-                    return GameServer.Yellow;
+                case "SILVER":
+                    return GameServer.Silver;
+                case "GOLD":
+                    return GameServer.Gold;
             }
             throw new Exception("The server " + name + " does not exist");
+        }
+
+        public static IPAddress GetMapAddress(this GameServer server)
+        {
+            var rand = new Random();
+            var addresses = Dns.GetHostAddresses(server + ".pokemonrevolution.net");
+            return addresses[rand.Next(0, addresses.Length - 1)];
         }
     }
 }

@@ -5,6 +5,9 @@ namespace PROProtocol
 {
     public class Battle
     {
+        public event Action OpponentChanged;
+        public event Action ActivePokemonChanged;
+
         public int OpponentId { get; private set; }
         public int OpponentHealth { get; private set; }
         public int CurrentHealth { get; private set; }
@@ -23,9 +26,13 @@ namespace PROProtocol
 
         public bool IsFinished { get; private set; }
 
+        public bool IsTrapped { get; private set; }
+
         public bool RepeatAttack { get; set; }
 
-        private string _playerName;
+        private readonly string _playerName;
+
+        private bool _opponentFainted;
 
         public Battle(string playerName, string[] data)
         {
@@ -100,6 +107,8 @@ namespace PROProtocol
 
             if (message.StartsWith("P:"))
             {
+                IsTrapped = false;
+
                 if (data[1] == _playerName)
                 {
                     int index = Convert.ToInt32(data[2]) - 1;
@@ -113,6 +122,8 @@ namespace PROProtocol
 
             if (message.StartsWith("C:"))
             {
+                IsTrapped = false;
+
                 int pokemonId = Convert.ToInt32(data[2]);
                 int level = Convert.ToInt32(data[3]);
                 bool isShiny = data[4] == "1";
@@ -126,7 +137,11 @@ namespace PROProtocol
 
                 if (data[1] == _playerName)
                 {
-                    SelectedPokemonIndex = index;
+                    if (SelectedPokemonIndex != index)
+                    {
+                        SelectedPokemonIndex = index;
+                        ActivePokemonChanged?.Invoke();
+                    }
                 }
                 else
                 {
@@ -139,6 +154,11 @@ namespace PROProtocol
                     OpponentGender = gender;
                     AlreadyCaught = alreadyCaught;
                     AlternateForm = int.Parse(alternateForm);
+                    if (_opponentFainted)
+                    {
+                        _opponentFainted = false;
+                        OpponentChanged?.Invoke();
+                    }
                 }
                 return true;
             }
@@ -146,7 +166,8 @@ namespace PROProtocol
             if (message.StartsWith("F:"))
             {
                 // Fainted
-                string player = data[1];
+                if (data[1] != _playerName)
+                    _opponentFainted = true;
                 return true;
             }
 
@@ -175,6 +196,11 @@ namespace PROProtocol
             {
                 // Capture animation (2 = fail, 3 = success).
                 return true;
+            }
+
+            if (message.Contains("$CantRun") || message.Contains("$NoSwitch"))
+            {
+                IsTrapped = true;
             }
 
             return false;
